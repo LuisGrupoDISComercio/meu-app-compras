@@ -514,8 +514,9 @@ def main():
             k1, k2, k3 = st.columns(3)
             k1.metric("Críticos",           int((df_sug["status"] == "🔴 Crítico").sum()))
             k2.metric("Em alerta",          int((df_sug["status"] == "🟡 Alerta").sum()))
-           k3.metric("Valor est. compra",  f"R$ {df_s['valor_estimado'].sum():,.0f}")
-
+            k3.metric("Valor est. compra",  f"R$ {df_s['valor_estimado"].sum():,.0f}")
+      
+            
             st.dataframe(
                 df_s[[
                     "status","fabricante_nome","grupo","produto_codigo","descricao",
