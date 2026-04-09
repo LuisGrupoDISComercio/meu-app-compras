@@ -1,22 +1,3 @@
-<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
-    <title>Sistema de Gestão AVAC</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.1/build/stlite.css" />
-  </head>
-  <body>
-    <div id="root"></div>
-    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.1/build/stlite.js"></script>
-    <script>
-      stlite.mount(
-        {
-          requirements: ["pandas", "plotly"], // Instala as bibliotecas de dados e gráficos
-          entrypoint: "app.py",
-          files: {
-            "app.py": `
 import streamlit as st
 import pandas as pd
 
@@ -66,14 +47,3 @@ elif menu == "Classificação ABC e Previsões":
     
     if st.button("Processar Algoritmo de Sugestão de POs"):
         st.success("Cálculo realizado! Sugestão de alocação de pedidos gerada e priorizada nas linhas Multi Split e VRF da Classe A.")
-
-st.sidebar.markdown("---")
-st.sidebar.caption("Processamento via WebAssembly (Client-Side) | Hospedagem: GitHub Pages")
-            `
-          }
-        },
-        document.getElementById("root")
-      );
-    </script>
-  </body>
-</html>
