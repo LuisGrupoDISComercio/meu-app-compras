@@ -46,14 +46,14 @@ NORMALIZA_MARCA_VENDAS = {
 }
 
 CONDICOES = {
-    "LG":           {"limite": 3_500_000, "prazo": 28},
-    "Samsung":      {"limite": 2_000_000, "prazo": 28},
-    "Springer Midea":{"limite": 1_500_000,"prazo": 28},
-    "Daikin":       {"limite": 5_000_000, "prazo": 35},
-    "Agratto":      {"limite":   500_000, "prazo": 28},
-    "Gree":         {"limite": 3_000_000, "prazo": 28},
-    "Trane":        {"limite": 2_000_000, "prazo": 35},
-    "TCL":          {"limite": 3_000_000, "prazo": 28},
+    "LG":            {"limite": 3_500_000, "prazo": 28},
+    "Samsung":       {"limite": 2_000_000, "prazo": 28},
+    "Springer Midea":{"limite": 1_500_000, "prazo": 28},
+    "Daikin":        {"limite": 5_000_000, "prazo": 35},
+    "Agratto":       {"limite":   500_000, "prazo": 28},
+    "Gree":          {"limite": 3_000_000, "prazo": 28},
+    "Trane":         {"limite": 2_000_000, "prazo": 35},
+    "TCL":           {"limite": 3_000_000, "prazo": 28},
 }
 
 MESES_PT = {
@@ -80,19 +80,47 @@ def normaliza_marca(valor: str) -> str:
     return valor.strip().title()
 
 def limpa_valor(s) -> float:
-    """Converte 'R$ 1.067' ou '1067,50' ou '1067.50' para float."""
+    """
+    Converte qualquer formato monetário BR para float.
+    Exemplos tratados:
+      'R$ 6.265.053,00'  -> 6265053.0
+      'R$ 1.067'         -> 1067.0
+      '1067,50'          -> 1067.5
+      '1067.50'          -> 1067.5
+      '6265053'          -> 6265053.0
+    """
     try:
         txt = str(s).strip()
-        txt = re.sub(r"[R$\s]", "", txt)   # remove R$, espaços
-        # se tem vírgula, assumir padrão BR: ponto=milhar, vírgula=decimal
-        if "," in txt:
+        # Remove R$, espaços e caracteres não numéricos exceto . e ,
+        txt = re.sub(r"[R$\s]", "", txt)
+        txt = txt.strip()
+
+        if not txt:
+            return 0.0
+
+        tem_virgula = "," in txt
+        tem_ponto   = "." in txt
+
+        if tem_virgula and tem_ponto:
+            # Formato BR clássico: 6.265.053,00
+            # Remove todos os pontos (separador de milhar) e troca vírgula por ponto
             txt = txt.replace(".", "").replace(",", ".")
-        # se não tem vírgula mas tem ponto, pode ser milhar BR (ex: "1.067")
-        # heurística: se só tem um ponto e a parte decimal tem 3 dígitos → milhar
-        elif txt.count(".") == 1:
+        elif tem_virgula and not tem_ponto:
+            # Só vírgula: pode ser decimal BR '1067,50' ou milhar '1.067' sem ponto
+            # Assume vírgula = decimal
+            txt = txt.replace(",", ".")
+        elif tem_ponto and not tem_virgula:
+            # Só ponto: heurística
             partes = txt.split(".")
-            if len(partes[1]) == 3:
+            # Se mais de um ponto → todos são milhar: '1.234.567'
+            if len(partes) > 2:
                 txt = txt.replace(".", "")
+            # Se um ponto e parte decimal com 3 dígitos → milhar: '1.067'
+            elif len(partes) == 2 and len(partes[1]) == 3:
+                txt = txt.replace(".", "")
+            # Caso contrário → decimal normal: '1067.50'
+        # else: sem ponto nem vírgula → número inteiro puro
+
         return float(txt)
     except Exception:
         return 0.0
@@ -108,7 +136,6 @@ def carregar_vendas(file_obj):
     COLUNAS = ["data_emissao", "marca", "segmento", "potencia",
                "ciclo", "codigo", "descricao", "quantidade", "valor"]
 
-    # Lê sem cabeçalho, atribui nomes explícitos
     df = pd.read_csv(
         StringIO(texto),
         sep=";",
@@ -121,40 +148,55 @@ def carregar_vendas(file_obj):
     # Remove colunas duplicadas caso existam
     df = df.loc[:, ~df.columns.duplicated()]
 
-    # Descarta linhas onde data_emissao não parece uma data (ex: cabeçalho acidental)
+    # Descarta linhas onde data_emissao não parece uma data
     df = df[df["data_emissao"].str.match(r"\d{2}/\d{2}/\d{4}", na=False)].copy()
 
-    # Converte data usando apply para evitar o "duplicate keys" do to_datetime
-    df["data_emissao"] = pd.to_datetime(
-        df["data_emissao"].apply(
-            lambda x: pd.to_datetime(x, dayfirst=True, errors="coerce")
-        )
+    # Converte data via apply (evita bug de duplicate keys do pandas)
+    df["data_emissao"] = df["data_emissao"].apply(
+        lambda x: pd.to_datetime(x, dayfirst=True, errors="coerce")
     )
 
     # Normaliza marca
     df["marca"] = df["marca"].apply(normaliza_marca)
 
-    # Converte valor — lida com "R$ 1.067", "1067,50", "1067.50"
+    # Converte valor
     df["valor"] = df["valor"].apply(limpa_valor)
 
-    # Converte quantidade
+    # Converte quantidade (mantém só dígitos)
     df["quantidade"] = pd.to_numeric(
         df["quantidade"].str.replace(r"\D", "", regex=True),
         errors="coerce"
     ).fillna(0).astype(int)
 
-    # Colunas auxiliares
-    df["ano"]  = df["data_emissao"].dt.year
-    df["mes"]  = df["data_emissao"].dt.month
+    # Colunas auxiliares de tempo
+    df["ano"]      = df["data_emissao"].dt.year
+    df["mes"]      = df["data_emissao"].dt.month
     df["mes_nome"] = df["mes"].map(MESES_PT)
 
     return df
 
+
 @st.cache_data(show_spinner=False)
 def carregar_estoque(file_obj):
-    df = pd.read_excel(file_obj, header=1)
+    # ── Tenta descobrir em qual linha está o cabeçalho real ──────────────────
+    # Lê as primeiras linhas sem cabeçalho para inspecionar
+    df_raw = pd.read_excel(file_obj, header=None, nrows=5)
+
+    header_row = 0  # default
+    for i, row in df_raw.iterrows():
+        valores = [str(v).strip() for v in row.values]
+        # Procura a linha que contenha "Fabr" ou "Produto"
+        if "Fabr" in valores or "Produto" in valores:
+            header_row = i
+            break
+
+    # Relê o arquivo a partir da linha do cabeçalho real
+    # (file_obj já foi lido, mas o Streamlit UploadedFile suporta seek)
+    file_obj.seek(0)
+    df = pd.read_excel(file_obj, header=header_row)
     df.columns = [str(c).strip() for c in df.columns]
 
+    # ── Renomeia para nomes internos ─────────────────────────────────────────
     rename = {
         "Fabr":                         "fabricante_id",
         "Produto":                      "produto_id",
@@ -167,13 +209,28 @@ def carregar_estoque(file_obj):
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
 
+    # ── Valida que as colunas essenciais existem ─────────────────────────────
+    faltando = [c for c in ("fabricante_id", "produto_id") if c not in df.columns]
+    if faltando:
+        raise KeyError(
+            f"Colunas não encontradas no Excel: {faltando}. "
+            f"Colunas disponíveis: {list(df.columns)}"
+        )
+
+    # ── Limpeza ──────────────────────────────────────────────────────────────
     df = df.dropna(subset=["fabricante_id", "produto_id"])
     df["fabricante_id"] = pd.to_numeric(df["fabricante_id"], errors="coerce")
+    df = df.dropna(subset=["fabricante_id"])  # remove linhas onde não virou número
     df = df[~df["fabricante_id"].isin(FABRICANTES_IGNORAR)]
-    df["fabricante_nome"] = df["fabricante_id"].map(MAPA_FABRICANTES_ESTOQUE).fillna("Outros")
+    df["fabricante_nome"] = (
+        df["fabricante_id"].map(MAPA_FABRICANTES_ESTOQUE).fillna("Outros")
+    )
 
     for col in ["qtde", "custo_unit", "custo_total", "cubagem"]:
-        df[col] = pd.to_numeric(df.get(col, 0), errors="coerce").fillna(0)
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        else:
+            df[col] = 0.0
 
     return df
 
@@ -184,19 +241,18 @@ def aba_estoque(estoque_df):
     st.header("📦 Estoque & ABC")
 
     col1, col2, col3, col4 = st.columns(4)
-    total_itens   = len(estoque_df)
-    total_unid    = int(estoque_df["qtde"].sum())
-    total_custo   = estoque_df["custo_total"].sum()
-    sem_custo     = int((estoque_df["custo_unit"] == 0).sum())
+    total_itens = len(estoque_df)
+    total_unid  = int(estoque_df["qtde"].sum())
+    total_custo = estoque_df["custo_total"].sum()
+    sem_custo   = int((estoque_df["custo_unit"] == 0).sum())
 
-    col1.metric("SKUs", f"{total_itens:,}")
-    col2.metric("Unidades", f"{total_unid:,}")
-    col3.metric("Custo Total (R$)", f"R$ {total_custo:,.0f}")
-    col4.metric("SKUs s/ custo", f"{sem_custo}")
+    col1.metric("SKUs",            f"{total_itens:,}")
+    col2.metric("Unidades",        f"{total_unid:,}")
+    col3.metric("Custo Total (R$)",f"R$ {total_custo:,.0f}")
+    col4.metric("SKUs s/ custo",   f"{sem_custo}")
 
     st.divider()
 
-    # Tabela por fabricante
     fab_df = (
         estoque_df.groupby("fabricante_nome")
         .agg(SKUs=("produto_id","count"),
@@ -212,22 +268,25 @@ def aba_estoque(estoque_df):
 
     st.divider()
 
-    # Curva ABC
     st.subheader("Curva ABC")
-    abc_df = (
-        estoque_df[estoque_df["abc"].notna() & (estoque_df["abc"] != "")]
-        .groupby("abc")
-        .agg(SKUs=("produto_id","count"),
-             Unidades=("qtde","sum"),
-             Custo=("custo_total","sum"))
-        .reset_index()
-        .sort_values("Custo", ascending=False)
-    )
-    fig = px.bar(abc_df, x="abc", y="Custo", color="abc",
-                 title="Custo de Estoque por Curva ABC",
-                 labels={"abc":"Curva","Custo":"R$"})
-    st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(abc_df, use_container_width=True, hide_index=True)
+    abc_col = "abc" if "abc" in estoque_df.columns else None
+    if abc_col:
+        abc_df = (
+            estoque_df[estoque_df[abc_col].notna() & (estoque_df[abc_col] != "")]
+            .groupby(abc_col)
+            .agg(SKUs=("produto_id","count"),
+                 Unidades=("qtde","sum"),
+                 Custo=("custo_total","sum"))
+            .reset_index()
+            .sort_values("Custo", ascending=False)
+        )
+        fig = px.bar(abc_df, x=abc_col, y="Custo", color=abc_col,
+                     title="Custo de Estoque por Curva ABC",
+                     labels={abc_col:"Curva","Custo":"R$"})
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(abc_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Coluna ABC não encontrada no arquivo.")
 
 
 def aba_vendas(vendas_df):
@@ -247,25 +306,22 @@ def aba_vendas(vendas_df):
     opcoes_mes = ["Todos"] + [MESES_PT[m] for m in meses_disp]
     mes_sel = col_mes.selectbox("Mês (ou Todos)", opcoes_mes, index=0)
 
-    # Filtra
     df_f = vendas_df[vendas_df["ano"] == ano_sel].copy()
     if mes_sel != "Todos":
         num_mes = {v: k for k, v in MESES_PT.items()}[mes_sel]
         df_f = df_f[df_f["mes"] == num_mes]
 
-    # KPIs
-    faturamento  = df_f["valor"].sum()
-    unidades     = int(df_f["quantidade"].sum())
-    nf_linhas    = len(df_f)
+    faturamento = df_f["valor"].sum()
+    unidades    = int(df_f["quantidade"].sum())
+    nf_linhas   = len(df_f)
 
     k1, k2, k3 = st.columns(3)
     k1.metric("Faturamento", f"R$ {faturamento:,.0f}")
-    k2.metric("Unidades", f"{unidades:,}")
-    k3.metric("NFs / linhas", f"{nf_linhas:,}")
+    k2.metric("Unidades",    f"{unidades:,}")
+    k3.metric("NFs / linhas",f"{nf_linhas:,}")
 
     st.divider()
 
-    # Tabela por marca
     st.subheader("Vendas por Marca")
     marca_df = (
         df_f.groupby("marca")
@@ -281,7 +337,6 @@ def aba_vendas(vendas_df):
         use_container_width=True, hide_index=True
     )
 
-    # Gráfico
     fig = px.bar(
         marca_df.sort_values("VL_Total"),
         x="VL_Total", y="marca", orientation="h",
@@ -293,7 +348,6 @@ def aba_vendas(vendas_df):
 
     st.divider()
 
-    # Evolução mensal
     st.subheader("Evolução Mensal")
     ev_df = (
         vendas_df[vendas_df["ano"] == ano_sel]
@@ -318,7 +372,6 @@ def aba_cobertura(estoque_df, vendas_df):
         st.warning("Carregue os dois arquivos para calcular a cobertura.")
         return
 
-    # Média mensal de vendas (últimos 3 meses disponíveis)
     ultimo_ano = int(vendas_df["ano"].max())
     ultimo_mes = int(vendas_df[vendas_df["ano"] == ultimo_ano]["mes"].max())
 
@@ -328,11 +381,11 @@ def aba_cobertura(estoque_df, vendas_df):
         meses_ref.append((a, m))
         m -= 1
         if m == 0:
-            m = 12
-            a -= 1
+            m, a = 12, a - 1
 
+    meses_set = set(meses_ref)
     df_ref = vendas_df[
-        vendas_df.apply(lambda r: (int(r["ano"]), int(r["mes"])) in meses_ref, axis=1)
+        vendas_df.apply(lambda r: (int(r["ano"]), int(r["mes"])) in meses_set, axis=1)
     ]
 
     media_mes = (
@@ -343,10 +396,9 @@ def aba_cobertura(estoque_df, vendas_df):
         .rename(columns={"quantidade":"media_mensal"})
     )
 
-    # Estoque atual por produto
     est = estoque_df[["produto_id","fabricante_nome","qtde","custo_unit"]].copy()
-    est["produto_id"] = est["produto_id"].astype(str).str.strip().str.lstrip("0")
-    media_mes["codigo"] = media_mes["codigo"].astype(str).str.strip().str.lstrip("0")
+    est["produto_id"]      = est["produto_id"].astype(str).str.strip().str.lstrip("0")
+    media_mes["codigo"]    = media_mes["codigo"].astype(str).str.strip().str.lstrip("0")
 
     merged = est.merge(media_mes, left_on="produto_id", right_on="codigo", how="left")
     merged["media_mensal"] = merged["media_mensal"].fillna(0)
@@ -390,11 +442,11 @@ def aba_sugestao(estoque_df, vendas_df):
         meses_ref.append((a, m))
         m -= 1
         if m == 0:
-            m = 12
-            a -= 1
+            m, a = 12, a - 1
 
+    meses_set = set(meses_ref)
     df_ref = vendas_df[
-        vendas_df.apply(lambda r: (int(r["ano"]), int(r["mes"])) in meses_ref, axis=1)
+        vendas_df.apply(lambda r: (int(r["ano"]), int(r["mes"])) in meses_set, axis=1)
     ]
 
     media_mes = (
@@ -408,21 +460,21 @@ def aba_sugestao(estoque_df, vendas_df):
     cobertura_alvo = st.slider("Cobertura desejada (meses)", 1, 6, 3)
 
     est = estoque_df[["produto_id","fabricante_nome","descricao","qtde","custo_unit"]].copy()
-    est["produto_id"] = est["produto_id"].astype(str).str.strip().str.lstrip("0")
+    est["produto_id"]   = est["produto_id"].astype(str).str.strip().str.lstrip("0")
     media_mes["codigo"] = media_mes["codigo"].astype(str).str.strip().str.lstrip("0")
 
     df_s = est.merge(media_mes, left_on="produto_id", right_on="codigo", how="left")
-    df_s["media_mensal"] = df_s["media_mensal"].fillna(0)
-    df_s["estoque_alvo"] = (df_s["media_mensal"] * cobertura_alvo).apply(np.ceil)
+    df_s["media_mensal"]    = df_s["media_mensal"].fillna(0)
+    df_s["estoque_alvo"]    = (df_s["media_mensal"] * cobertura_alvo).apply(np.ceil)
     df_s["sugestao_compra"] = (df_s["estoque_alvo"] - df_s["qtde"]).clip(lower=0).apply(np.ceil)
-    df_s["valor_estimado"] = df_s["sugestao_compra"] * df_s["custo_unit"]
+    df_s["valor_estimado"]  = df_s["sugestao_compra"] * df_s["custo_unit"]
 
     df_s = df_s[df_s["sugestao_compra"] > 0].sort_values("valor_estimado", ascending=False)
 
     k1, k2, k3 = st.columns(3)
-    k1.metric("SKUs p/ comprar", f"{len(df_s):,}")
-    k2.metric("Unidades totais", f"{int(df_s['sugestao_compra'].sum()):,}")
-    k3.metric("Valor est. compra", f"R$ {df_s['valor_estimado'].sum():,.0f}")
+    k1.metric("SKUs p/ comprar",  f"{len(df_s):,}")
+    k2.metric("Unidades totais",  f"{int(df_s['sugestao_compra'].sum()):,}")
+    k3.metric("Valor est. compra",f"R$ {df_s['valor_estimado'].sum():,.0f}")
 
     cols_sug = ["produto_id","fabricante_nome","descricao","qtde",
                 "media_mensal","estoque_alvo","sugestao_compra","valor_estimado"]
@@ -448,9 +500,9 @@ def aba_fornecedores(estoque_df):
 
     dados_cond = [
         {
-            "Fornecedor": fab,
+            "Fornecedor":  fab,
             "Limite (R$)": f"R$ {c['limite']:,.0f}" if c["limite"] > 0 else "—",
-            "Prazo (dias)": c["prazo"] if c["prazo"] > 0 else "Antecipado",
+            "Prazo (dias)":c["prazo"] if c["prazo"] > 0 else "Antecipado",
         }
         for fab, c in CONDICOES.items()
     ]
