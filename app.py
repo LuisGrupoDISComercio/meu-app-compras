@@ -2,30 +2,33 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import re
-from io import StringIO
+import plotly.graph_objects as go
+from io import BytesIO
 
+# ─────────────────────────────────────────────
+# CONFIGURAÇÃO DA PÁGINA
+# ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Motor de Compras — Ar Condicionado",
+    page_title="Gestão de Compras",
     page_icon="❄️",
-    layout="wide"
+    layout="wide",
 )
 
 # ─────────────────────────────────────────────
 # CONSTANTES
 # ─────────────────────────────────────────────
-MAPA_FABRICANTES_ESTOQUE = {
-    2:  "LG",
-    3:  "Samsung",
-    4:  "Springer Midea",
-    5:  "Daikin",
-    6:  "Agratto",
-    7:  "Gree",
-    10: "Trane",
-    11: "TCL",
+MAPA_FABRICANTES = {
+    "002": "LG",
+    "003": "Samsung",
+    "004": "Carrier / Midea",
+    "005": "Daikin",
+    "006": "Agratto",
+    "007": "Gree",
+    "010": "Trane",
+    "011": "TCL",
 }
 
-FABRICANTES_IGNORAR = {900, 995, 998, 999}
+FABRICANTES_GIRO = {"002", "003", "004", "005", "006", "007", "010", "011"}
 
 NORMALIZA_MARCA_VENDAS = {
     "SPRINGER MIDEA": "Springer Midea",
@@ -33,638 +36,461 @@ NORMALIZA_MARCA_VENDAS = {
     "MIDEA":          "Springer Midea",
     "DAIKIN":         "Daikin",
     "LG":             "LG",
-    "SAMSUNG":        "Samsung",
     "GREE":           "Gree",
+    "SAMSUNG":        "Samsung",
     "TRANE":          "Trane",
     "TCL":            "TCL",
     "AGRATTO":        "Agratto",
-    "DANIFICADO":     "DANIFICADOS",
-    "DANIFICADOS":    "DANIFICADOS",
-    "SEMI NOVOS":     "SEMI NOVOS",
-    "SEMI":           "SEMI NOVOS",
-    "ELGIN":          "ELGIN",
+    "CARRIER":        "Carrier",
 }
 
-CONDICOES = {
-    "LG":            {"limite": 3_500_000, "prazo": 28},
-    "Samsung":       {"limite": 2_000_000, "prazo": 28},
-    "Springer Midea":{"limite": 1_500_000, "prazo": 28},
-    "Daikin":        {"limite": 5_000_000, "prazo": 35},
-    "Agratto":       {"limite":   500_000, "prazo": 28},
-    "Gree":          {"limite": 3_000_000, "prazo": 28},
-    "Trane":         {"limite": 2_000_000, "prazo": 35},
-    "TCL":           {"limite": 3_000_000, "prazo": 28},
-}
-
-MESES_PT = {
-    1:"Jan", 2:"Fev", 3:"Mar", 4:"Abr", 5:"Mai", 6:"Jun",
-    7:"Jul", 8:"Ago", 9:"Set", 10:"Out", 11:"Nov", 12:"Dez"
-}
+COBERTURA_META_DIAS = 60   # meta de cobertura em dias
+LEAD_TIME_DIAS      = 30   # lead time padrão de reposição
 
 # ─────────────────────────────────────────────
-# HELPERS
+# FUNÇÕES DE CARGA
 # ─────────────────────────────────────────────
-def decode_bytes(raw: bytes) -> str:
-    for enc in ("utf-8-sig", "latin-1", "cp1252", "iso-8859-1", "utf-8"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace")
 
-def normaliza_marca(valor: str) -> str:
-    v = str(valor).strip().upper()
-    for chave, nome in NORMALIZA_MARCA_VENDAS.items():
-        if v == chave or v.startswith(chave):
-            return nome
-    return valor.strip().title()
-
-def limpa_valor(s) -> float:
-    """
-    Converte qualquer formato monetário BR para float.
-    'R$ 6.265.053,00' -> 6265053.0
-    'R$ 1.067'        -> 1067.0
-    '1067,50'         -> 1067.5
-    '1067.50'         -> 1067.5
-    '6265053'         -> 6265053.0
-    """
-    try:
-        txt = str(s).strip()
-        txt = re.sub(r"[R$\s]", "", txt)
-        txt = txt.strip()
-        if not txt:
-            return 0.0
-        tem_virgula = "," in txt
-        tem_ponto   = "." in txt
-        if tem_virgula and tem_ponto:
-            txt = txt.replace(".", "").replace(",", ".")
-        elif tem_virgula and not tem_ponto:
-            txt = txt.replace(",", ".")
-        elif tem_ponto and not tem_virgula:
-            partes = txt.split(".")
-            if len(partes) > 2:
-                txt = txt.replace(".", "")
-            elif len(partes) == 2 and len(partes[1]) == 3:
-                txt = txt.replace(".", "")
-        return float(txt)
-    except Exception:
-        return 0.0
-
-# ─────────────────────────────────────────────
-# CARREGAMENTO DE DADOS
-# ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def carregar_estoque(file_obj):
-    """
-    Lê o Estoque.xlsx de forma robusta:
-    - Detecta automaticamente em qual linha está o cabeçalho
-    - Mapeia os nomes reais das colunas para os nomes internos
-    - Filtra fabricantes inválidos
-    """
-    # Lê sem cabeçalho para inspecionar as primeiras linhas
-    df_raw = pd.read_excel(file_obj, header=None, dtype=str)
+def carregar_estoque(file) -> pd.DataFrame:
+    """Lê o relatório de estoque do ERP e retorna o DataFrame de giro."""
+    xls = pd.read_excel(file, sheet_name=0, header=None)
 
-    # Procura a linha onde aparecem "Fabr" e "Produto" (cabeçalho real)
-    header_row = 0
-    for i, row in df_raw.iterrows():
-        valores = [str(v).strip() for v in row.values]
-        if any("Fabr" in v for v in valores) and any("Produto" in v for v in valores):
+    # Localiza a linha de cabeçalho real ("Fabr", "Produto", ...)
+    header_row = None
+    for i, row in xls.iterrows():
+        vals = [str(v).strip().lower() for v in row.values if pd.notna(v)]
+        if any("fabr" in v for v in vals) and any("produto" in v for v in vals):
             header_row = i
             break
 
-    # Relê com o cabeçalho correto
-    file_obj.seek(0)
-    df = pd.read_excel(file_obj, header=header_row, dtype=str)
+    if header_row is None:
+        st.error("Não foi possível localizar o cabeçalho no arquivo de estoque.")
+        st.stop()
 
-    # Remove colunas totalmente vazias e linhas totalmente vazias
-    df = df.dropna(how="all", axis=1).dropna(how="all", axis=0)
-
-    # Normaliza os nomes das colunas (strip + lower para mapeamento)
+    df = pd.read_excel(file, sheet_name=0, header=header_row)
     df.columns = [str(c).strip() for c in df.columns]
 
-    # ── Mapeamento flexível de colunas ──────────────────────────────
-    # Chave: substring que identifica a coluna real
-    # Valor: nome interno que o app usa
-    MAPA_COLUNAS = {
-        "Fabr":       "fabricante_id",
-        "Produto":    "produto_id",
-        "Descri":     "descricao",      # "Descrição" ou "Descrição"
-        "Classe":     "classe_abc",
-        "M":          "volume",         # "M³" ou "M3"
-        "Qtde":       "qtde",
-        "Custo Unit": "custo_unit",
-        "Custo Tot":  "custo_total",
-    }
-
+    # Renomeia colunas para nomes internos padronizados
     rename_map = {}
     for col in df.columns:
-        col_upper = col.upper()
-        for chave, nome_interno in MAPA_COLUNAS.items():
-            if chave.upper() in col_upper and nome_interno not in rename_map.values():
-                rename_map[col] = nome_interno
-                break
+        cl = col.lower()
+        if "fabr" in cl and "fabricante" not in cl:
+            rename_map[col] = "fabricante_codigo"
+        elif col.lower() == "produto":
+            rename_map[col] = "sku"
+        elif "descri" in cl:
+            rename_map[col] = "descricao"
+        elif "abc" in cl:
+            rename_map[col] = "abc"
+        elif "qtde" in cl or "quantidade" in cl:
+            rename_map[col] = "qtde_estoque"
+        elif "unit" in cl and "custo" in cl:
+            rename_map[col] = "custo_unitario"
+        elif "total" in cl and "custo" in cl:
+            rename_map[col] = "custo_total"
 
     df = df.rename(columns=rename_map)
 
-    # Verifica se as colunas obrigatórias foram encontradas
-    obrigatorias = ["fabricante_id", "produto_id", "qtde", "custo_unit", "custo_total"]
-    faltando = [c for c in obrigatorias if c not in df.columns]
-    if faltando:
-        raise KeyError(faltando)
+    # Remove linhas completamente vazias
+    df = df.dropna(how="all")
 
-    # Adiciona colunas opcionais se não existirem
-    for col in ["descricao", "classe_abc", "volume"]:
-        if col not in df.columns:
-            df[col] = ""
+    # Remove linhas de TOTAL e cabeçalhos repetidos
+    if "descricao" in df.columns:
+        df = df[~df["descricao"].astype(str).str.upper().str.strip().isin(["TOTAL", "DESCRIÇÃO", "DESCRICAO"])]
 
-    # ── Limpeza e tipagem ───────────────────────────────────────────
-    df["fabricante_id"] = pd.to_numeric(df["fabricante_id"], errors="coerce")
-    df["produto_id"]    = pd.to_numeric(df["produto_id"],    errors="coerce")
+    # Garante que fabricante_codigo existe
+    if "fabricante_codigo" not in df.columns:
+        st.error("Coluna 'Fabr' não encontrada no arquivo de estoque.")
+        st.stop()
 
-    # Remove linhas sem fabricante ou produto válido
-    df = df.dropna(subset=["fabricante_id", "produto_id"])
+    # Normaliza fabricante_codigo como string de 3 dígitos
+    df["fabricante_codigo"] = (
+        df["fabricante_codigo"]
+        .astype(str)
+        .str.strip()
+        .str.split(".")
+        .str[0]
+        .str.zfill(3)
+    )
 
-    # Filtra fabricantes a ignorar
-    df = df[~df["fabricante_id"].isin(FABRICANTES_IGNORAR)].copy()
+    # Filtra apenas fabricantes de giro
+    df_giro = df[df["fabricante_codigo"].isin(FABRICANTES_GIRO)].copy()
 
-    # Converte campos numéricos
-    df["qtde"]       = df["qtde"].apply(limpa_valor)
-    df["custo_unit"] = df["custo_unit"].apply(limpa_valor)
-    df["custo_total"]= df["custo_total"].apply(limpa_valor)
-    df["volume"]     = df["volume"].apply(limpa_valor)
+    # Converte colunas numéricas
+    for col in ["qtde_estoque", "custo_unitario", "custo_total"]:
+        if col in df_giro.columns:
+            df_giro[col] = pd.to_numeric(df_giro[col], errors="coerce").fillna(0)
 
-    df["fabricante_id"] = df["fabricante_id"].astype(int)
-    df["produto_id"]    = df["produto_id"].astype(int)
+    # Garante que SKU é string
+    df_giro["sku"] = df_giro["sku"].astype(str).str.strip().str.split(".").str[0].str.zfill(6)
 
-    # Mapeia nome do fabricante
-    df["fabricante_nome"] = df["fabricante_id"].map(MAPA_FABRICANTES_ESTOQUE).fillna("Outros")
+    # Mapeia fabricante_nome
+    df_giro["fabricante_nome"] = df_giro["fabricante_codigo"].map(MAPA_FABRICANTES).fillna("Outros")
 
-    # Garante que descrição é string
-    df["descricao"] = df["descricao"].fillna("").astype(str).str.strip()
-    df["classe_abc"]= df["classe_abc"].fillna("").astype(str).str.strip()
+    # Corrige fabricante usando descrição quando estiver como "Outros"
+    def corrigir_fabricante_com_descricao(row):
+        nome = row["fabricante_nome"]
+        desc = str(row.get("descricao", "")).upper()
+        if nome == "Outros":
+            if "DAIKIN" in desc:
+                return "Daikin"
+            if "MIDEA" in desc or "SPRINGER MIDEA" in desc:
+                return "Springer Midea"
+            if "GREE" in desc:
+                return "Gree"
+            if "SAMSUNG" in desc:
+                return "Samsung"
+            if "AGRATTO" in desc:
+                return "Agratto"
+            if "TRANE" in desc:
+                return "Trane"
+            if "TCL" in desc:
+                return "TCL"
+        return nome
 
-    return df.reset_index(drop=True)
+    df_giro["fabricante_nome"] = df_giro.apply(corrigir_fabricante_com_descricao, axis=1)
+
+    # Flag para itens com custo zero (para alertas visuais, sem excluir)
+    df_giro["flag_custo_zero"] = df_giro["custo_total"].eq(0)
+
+    return df_giro
 
 
 @st.cache_data(show_spinner=False)
-def carregar_vendas(file_obj):
-    raw   = file_obj.read()
-    texto = decode_bytes(raw)
-
-    COLUNAS = ["data_emissao", "marca", "segmento", "potencia",
-               "ciclo", "codigo", "descricao", "quantidade", "valor"]
-
+def carregar_vendas(file) -> pd.DataFrame:
+    """Lê o CSV de vendas e retorna o DataFrame normalizado."""
     df = pd.read_csv(
-        StringIO(texto),
+        file,
         sep=";",
-        header=None,
-        names=COLUNAS,
+        encoding="utf-8",
+        on_bad_lines="skip",
         dtype=str,
-        keep_default_na=False,
     )
 
-    # Remove colunas duplicadas
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    # Descarta linhas onde data_emissao não é dd/mm/aaaa
-    df = df[df["data_emissao"].str.match(r"^\d{2}/\d{2}/\d{4}$", na=False)].copy()
-
-    # Converte data via apply (evita bug duplicate-keys do pandas moderno)
-    df["data_emissao"] = df["data_emissao"].apply(
-        lambda x: pd.to_datetime(x, dayfirst=True, errors="coerce")
-    )
-
-    df = df.dropna(subset=["data_emissao"]).copy()
-
-    df["quantidade"] = df["quantidade"].apply(limpa_valor)
-    df["valor"]      = df["valor"].apply(limpa_valor)
-    df["marca"]      = df["marca"].apply(normaliza_marca)
-    df["codigo"]     = df["codigo"].astype(str).str.strip().str.lstrip("0")
-    df["ano"]        = df["data_emissao"].dt.year
-    df["mes"]        = df["data_emissao"].dt.month
-
-    return df.reset_index(drop=True)
-
-
-# ─────────────────────────────────────────────
-# ABAS
-# ─────────────────────────────────────────────
-def aba_estoque(estoque_df):
-    st.header("📦 Estoque & Curva ABC")
-
-    # ── KPIs ────────────────────────────────────────────────────────
-    total_itens   = len(estoque_df)
-    total_unid    = int(estoque_df["qtde"].sum())
-    total_valor   = estoque_df["custo_total"].sum()
-    total_volume  = estoque_df["volume"].sum()
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("SKUs ativos",      f"{total_itens:,}")
-    k2.metric("Unidades em estoque", f"{total_unid:,}")
-    k3.metric("Valor total (R$)", f"R$ {total_valor:,.0f}")
-    k4.metric("Volume total (m³)",f"{total_volume:,.2f}")
-
-    st.divider()
-
-    # ── Por fabricante ───────────────────────────────────────────────
-    st.subheader("Estoque por fabricante")
-    fab_df = (
-        estoque_df.groupby("fabricante_nome")
-        .agg(SKUs=("produto_id","count"),
-             Unidades=("qtde","sum"),
-             Valor=("custo_total","sum"))
-        .sort_values("Valor", ascending=False)
-        .reset_index()
-    )
-    fab_df["% Valor"] = (fab_df["Valor"] / fab_df["Valor"].sum() * 100).round(1)
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        st.dataframe(
-            fab_df.rename(columns={"fabricante_nome":"Fabricante",
-                                   "SKUs":"SKUs","Unidades":"Unid.",
-                                   "Valor":"Valor (R$)","% Valor":"% Valor"}),
-            use_container_width=True, hide_index=True
-        )
-    with col2:
-        fig = px.pie(fab_df, values="Valor", names="fabricante_nome",
-                     title="Participação por valor (R$)")
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.divider()
-
-    # ── Curva ABC ────────────────────────────────────────────────────
-    st.subheader("Curva ABC (por valor de estoque)")
-    abc = estoque_df.copy().sort_values("custo_total", ascending=False)
-    abc["acum_pct"] = abc["custo_total"].cumsum() / abc["custo_total"].sum() * 100
-    abc["curva"] = pd.cut(abc["acum_pct"],
-                          bins=[0, 80, 95, 100],
-                          labels=["A","B","C"])
-
-    resumo_abc = (
-        abc.groupby("curva", observed=True)
-        .agg(SKUs=("produto_id","count"),
-             Valor=("custo_total","sum"))
-        .reset_index()
-    )
-    resumo_abc["% Valor"] = (resumo_abc["Valor"] / resumo_abc["Valor"].sum() * 100).round(1)
-
-    col3, col4 = st.columns([1, 1])
-    with col3:
-        st.dataframe(resumo_abc, use_container_width=True, hide_index=True)
-    with col4:
-        fig2 = px.bar(resumo_abc, x="curva", y="Valor",
-                      color="curva", title="Valor por classe ABC",
-                      labels={"curva":"Classe","Valor":"R$"})
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.divider()
-
-    # ── Tabela completa ──────────────────────────────────────────────
-    with st.expander("📋 Tabela completa do estoque"):
-        st.dataframe(
-            estoque_df[[
-                "fabricante_nome","produto_id","descricao",
-                "classe_abc","qtde","custo_unit","custo_total","volume"
-            ]].rename(columns={
-                "fabricante_nome":"Marca","produto_id":"Código",
-                "descricao":"Descrição","classe_abc":"ABC",
-                "qtde":"Qtde","custo_unit":"Custo Unit.",
-                "custo_total":"Custo Total","volume":"M³"
-            }),
-            use_container_width=True, hide_index=True
-        )
-
-
-def aba_vendas(vendas_df):
-    st.header("📈 Vendas & Demanda")
-
-    anos_disp = sorted(vendas_df["ano"].unique(), reverse=True)
-    ano_sel   = st.selectbox("Ano de referência", anos_disp)
-    df_ano    = vendas_df[vendas_df["ano"] == ano_sel].copy()
-
-    # KPIs
-    total_receita = df_ano["valor"].sum()
-    total_unid    = int(df_ano["quantidade"].sum())
-    total_nf      = df_ano["data_emissao"].nunique()
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Faturamento",       f"R$ {total_receita:,.2f}")
-    k2.metric("Unidades vendidas", f"{total_unid:,}")
-    k3.metric("Dias com movimento",f"{total_nf:,}")
-
-    st.divider()
-
-    # ── Vendas mensais ───────────────────────────────────────────────
-    st.subheader("Faturamento mensal")
-    mensal = (
-        df_ano.groupby("mes")["valor"].sum()
-        .reset_index()
-        .sort_values("mes")
-    )
-    mensal["mes_nome"] = mensal["mes"].map(MESES_PT)
-    fig_m = px.bar(mensal, x="mes_nome", y="valor",
-                   title=f"Faturamento mensal — {ano_sel}",
-                   labels={"mes_nome":"Mês","valor":"R$"})
-    st.plotly_chart(fig_m, use_container_width=True)
-
-    st.divider()
-
-    # ── Por marca ────────────────────────────────────────────────────
-    st.subheader("Faturamento por marca")
-    por_marca = (
-        df_ano.groupby("marca")
-        .agg(Faturamento=("valor","sum"),
-             Unidades=("quantidade","sum"))
-        .sort_values("Faturamento", ascending=False)
-        .reset_index()
-    )
-    por_marca["% Fat."] = (por_marca["Faturamento"] / por_marca["Faturamento"].sum() * 100).round(1)
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        st.dataframe(por_marca, use_container_width=True, hide_index=True)
-    with col2:
-        fig_marca = px.pie(por_marca, values="Faturamento", names="marca",
-                           title="Participação por marca (%)")
-        st.plotly_chart(fig_marca, use_container_width=True)
-
-    st.divider()
-
-    # ── Top SKUs ─────────────────────────────────────────────────────
-    st.subheader("Top 20 SKUs mais vendidos (por faturamento)")
-    top_sku = (
-        df_ano.groupby(["codigo","descricao"])
-        .agg(Faturamento=("valor","sum"),
-             Unidades=("quantidade","sum"))
-        .sort_values("Faturamento", ascending=False)
-        .head(20)
-        .reset_index()
-    )
-    st.dataframe(top_sku, use_container_width=True, hide_index=True)
-
-
-def aba_cobertura(estoque_df, vendas_df):
-    st.header("📊 Cobertura de Estoque")
-
-    if estoque_df.empty or vendas_df.empty:
-        st.info("Carregue os dois arquivos para ver a cobertura.")
-        return
-
-    anos_disp = sorted(vendas_df["ano"].unique(), reverse=True)
-    ano_ref   = st.selectbox("Ano de referência para média", anos_disp, key="cob_ano")
-
-    meses_disp = sorted(vendas_df[vendas_df["ano"] == ano_ref]["mes"].unique())
-    meses_sel  = st.multiselect(
-        "Meses para calcular média",
-        options=meses_disp,
-        default=meses_disp[-3:] if len(meses_disp) >= 3 else meses_disp,
-        format_func=lambda m: MESES_PT.get(m, m),
-        key="cob_meses"
-    )
-
-    if not meses_sel:
-        st.warning("Selecione ao menos um mês.")
-        return
-
-    df_ref = vendas_df[
-        (vendas_df["ano"] == ano_ref) &
-        (vendas_df["mes"].isin(meses_sel))
-    ].copy()
-
-    n_meses = len(meses_sel)
-    media_mes = (
-        df_ref.groupby("codigo")["quantidade"]
-        .sum()
-        .div(n_meses)
-        .reset_index()
-        .rename(columns={"quantidade": "media_mensal"})
-    )
-
-    est = estoque_df[["produto_id","fabricante_nome","descricao","qtde"]].copy()
-    est["produto_id"]   = est["produto_id"].astype(str).str.strip().str.lstrip("0")
-    media_mes["codigo"] = media_mes["codigo"].astype(str).str.strip().str.lstrip("0")
-
-    df_cob = est.merge(media_mes, left_on="produto_id", right_on="codigo", how="left")
-    df_cob["media_mensal"] = df_cob["media_mensal"].fillna(0)
-    df_cob["cobertura_meses"] = np.where(
-        df_cob["media_mensal"] > 0,
-        df_cob["qtde"] / df_cob["media_mensal"],
-        np.nan
-    )
-
-    # KPIs
-    sem_giro   = int((df_cob["media_mensal"] == 0).sum())
-    cob_baixa  = int((df_cob["cobertura_meses"] < 1).sum())
-    cob_ok     = int(((df_cob["cobertura_meses"] >= 1) & (df_cob["cobertura_meses"] <= 3)).sum())
-    cob_alta   = int((df_cob["cobertura_meses"] > 3).sum())
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Sem giro",         f"{sem_giro}")
-    k2.metric("Cobertura < 1 mês",f"{cob_baixa}")
-    k3.metric("Cobertura 1–3 m",  f"{cob_ok}")
-    k4.metric("Cobertura > 3 m",  f"{cob_alta}")
-
-    st.divider()
-
-    fig_cob = px.histogram(
-        df_cob.dropna(subset=["cobertura_meses"]),
-        x="cobertura_meses",
-        nbins=30,
-        title="Distribuição de cobertura (meses)",
-        labels={"cobertura_meses":"Cobertura (meses)","count":"SKUs"}
-    )
-    st.plotly_chart(fig_cob, use_container_width=True)
-
-    st.divider()
-
-    with st.expander("📋 Tabela de cobertura por SKU"):
-        st.dataframe(
-            df_cob[[
-                "fabricante_nome","produto_id","descricao",
-                "qtde","media_mensal","cobertura_meses"
-            ]].rename(columns={
-                "fabricante_nome":"Marca","produto_id":"Código",
-                "descricao":"Descrição","qtde":"Estoque",
-                "media_mensal":"Média/Mês","cobertura_meses":"Cobertura (m)"
-            }).sort_values("Cobertura (m)"),
-            use_container_width=True, hide_index=True
-        )
-
-
-def aba_sugestao(estoque_df, vendas_df):
-    st.header("🛒 Sugestão de Compras")
-
-    if estoque_df.empty or vendas_df.empty:
-        st.info("Carregue os dois arquivos para gerar sugestão de compras.")
-        return
-
-    anos_disp = sorted(vendas_df["ano"].unique(), reverse=True)
-    ano_ref   = st.selectbox("Ano de referência", anos_disp, key="sug_ano")
-
-    meses_disp = sorted(vendas_df[vendas_df["ano"] == ano_ref]["mes"].unique())
-    meses_sel  = st.multiselect(
-        "Meses para calcular média de vendas",
-        options=meses_disp,
-        default=meses_disp[-3:] if len(meses_disp) >= 3 else meses_disp,
-        format_func=lambda m: MESES_PT.get(m, m),
-        key="sug_meses"
-    )
-
-    if not meses_sel:
-        st.warning("Selecione ao menos um mês.")
-        return
-
-    cobertura_alvo = st.slider("Cobertura desejada (meses)", 1, 6, 3)
-
-    df_ref  = vendas_df[
-        (vendas_df["ano"] == ano_ref) &
-        (vendas_df["mes"].isin(meses_sel))
-    ].copy()
-
-    n_meses = len(meses_sel)
-    media_mes = (
-        df_ref.groupby("codigo")["quantidade"]
-        .sum()
-        .div(n_meses)
-        .reset_index()
-        .rename(columns={"quantidade": "media_mensal"})
-    )
-
-    est = estoque_df[["produto_id","fabricante_nome","descricao","qtde","custo_unit"]].copy()
-    est["produto_id"]   = est["produto_id"].astype(str).str.strip().str.lstrip("0")
-    media_mes["codigo"] = media_mes["codigo"].astype(str).str.strip().str.lstrip("0")
-
-    df_s = est.merge(media_mes, left_on="produto_id", right_on="codigo", how="left")
-    df_s["media_mensal"]    = df_s["media_mensal"].fillna(0)
-    df_s["estoque_alvo"]    = (df_s["media_mensal"] * cobertura_alvo).apply(np.ceil)
-    df_s["sugestao_compra"] = (df_s["estoque_alvo"] - df_s["qtde"]).clip(lower=0).apply(np.ceil)
-    df_s["valor_estimado"]  = df_s["sugestao_compra"] * df_s["custo_unit"]
-
-    df_s = df_s[df_s["sugestao_compra"] > 0].sort_values("valor_estimado", ascending=False)
-
-    if df_s.empty:
-        st.success("Nenhuma compra sugerida com os parâmetros selecionados.")
-        return
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("SKUs p/ comprar",   f"{len(df_s):,}")
-    k2.metric("Unidades totais",   f"{int(df_s['sugestao_compra'].sum()):,}")
-    k3.metric("Valor est. compra", f"R$ {df_s['valor_estimado'].sum():,.0f}")
-
-    cols_sug = ["produto_id","fabricante_nome","descricao","qtde",
-                "media_mensal","estoque_alvo","sugestao_compra","valor_estimado"]
-    st.dataframe(
-        df_s[cols_sug].rename(columns={
-            "produto_id":"Código","fabricante_nome":"Marca","descricao":"Descrição",
-            "qtde":"Estoque Atual","media_mensal":"Média/Mês","estoque_alvo":"Alvo",
-            "sugestao_compra":"Sugestão","valor_estimado":"Valor Est. (R$)"
-        }),
-        use_container_width=True, hide_index=True
-    )
-
-    st.download_button(
-        "⬇️ Exportar sugestão (CSV)",
-        df_s[cols_sug].to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-        "sugestao_compras.csv",
-        "text/csv",
-    )
-
-
-def aba_fornecedores(estoque_df):
-    st.header("🏭 Fornecedores")
-
-    dados_cond = [
-        {
-            "Fornecedor":  fab,
-            "Limite (R$)": f"R$ {c['limite']:,.0f}" if c["limite"] > 0 else "—",
-            "Prazo (dias)":c["prazo"] if c["prazo"] > 0 else "Antecipado",
-        }
-        for fab, c in CONDICOES.items()
-    ]
-    st.subheader("Condições Comerciais")
-    st.dataframe(pd.DataFrame(dados_cond), use_container_width=True, hide_index=True)
-
-    if not estoque_df.empty:
-        st.divider()
-        st.subheader("Estoque atual vs Limite de crédito")
-        est_fab = estoque_df.groupby("fabricante_nome")["custo_total"].sum().reset_index()
-        est_fab.columns = ["Fornecedor","Estoque Atual (R$)"]
-        df_cred = pd.DataFrame([
-            {"Fornecedor": k, "Limite (R$)": v["limite"]}
-            for k, v in CONDICOES.items()
-        ]).merge(est_fab, on="Fornecedor", how="left")
-        df_cred["Estoque Atual (R$)"] = df_cred["Estoque Atual (R$)"].fillna(0)
-        df_cred["% do Limite"] = (
-            df_cred["Estoque Atual (R$)"] /
-            df_cred["Limite (R$)"].replace(0, np.nan) * 100
-        ).round(1)
-
-        fig_c = px.bar(
-            df_cred[df_cred["Limite (R$)"] > 0],
-            x="Fornecedor",
-            y=["Limite (R$)", "Estoque Atual (R$)"],
-            barmode="group",
-            title="Limite de crédito x Estoque atual",
-            labels={"value":"R$","variable":""}
-        )
-        st.plotly_chart(fig_c, use_container_width=True)
+    df.columns = [c.strip() for c in df.columns]
+
+    # Renomeia colunas
+    rename_map = {
+        "Emissao NF": "data",
+        "Marca":      "marca",
+        "Grupo":      "grupo",
+        "BTU":        "btu",
+        "Ciclo":      "ciclo",
+        "Produto":    "sku",
+        "Descricao":  "descricao",
+        "Qtde":       "qtde_venda",
+        "VL Total":   "vl_total",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+    # Converte data
+    df["data"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce")
+    df = df.dropna(subset=["data"])
+
+    # Normaliza marca
+    df["marca"] = df["marca"].astype(str).str.strip().str.upper()
+    df["marca_norm"] = df["marca"].map(NORMALIZA_MARCA_VENDAS).fillna(df["marca"].str.title())
+
+    # Converte numéricos
+    df["qtde_venda"] = pd.to_numeric(df["qtde_venda"], errors="coerce").fillna(0)
+    df["vl_total"]   = pd.to_numeric(df["vl_total"],   errors="coerce").fillna(0)
+
+    # SKU como string padronizada
+    df["sku"] = df["sku"].astype(str).str.strip().str.zfill(6)
+
+    # Colunas de período
+    df["ano"]  = df["data"].dt.year
+    df["mes"]  = df["data"].dt.month
+    df["ano_mes"] = df["data"].dt.to_period("M").astype(str)
+
+    return df
 
 
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
-def main():
-    st.title("❄️ Motor de Compras — Ar Condicionado")
 
+def main():
+    st.title("❄️ Gestão de Compras — Ar Condicionado")
+
+    # ── Sidebar: upload de arquivos ──────────────────────────
     with st.sidebar:
         st.header("📂 Arquivos")
-        file_estoque = st.file_uploader("Estoque (.xlsx)", type=["xlsx"])
-        file_vendas  = st.file_uploader("Vendas (.csv)",  type=["csv"])
+        file_estoque = st.file_uploader("Estoque (.xlsx)", type=["xlsx", "xls"])
+        file_vendas  = st.file_uploader("Vendas (.csv)",   type=["csv"])
+        st.markdown("---")
+        st.caption("Versão 2.0 · Inner AI")
 
-    estoque_df = pd.DataFrame()
-    vendas_df  = pd.DataFrame()
+    if not file_estoque or not file_vendas:
+        st.info("⬅️ Faça o upload do Estoque (.xlsx) e do Vendas (.csv) para começar.")
+        return
 
-    if file_estoque:
-        try:
-            estoque_df = carregar_estoque(file_estoque)
-        except Exception as e:
-            st.error(f"Erro ao carregar estoque: {e}")
+    with st.spinner("Carregando dados..."):
+        df_estoque = carregar_estoque(file_estoque)
+        df_vendas  = carregar_vendas(file_vendas)
 
-    if file_vendas:
-        try:
-            vendas_df = carregar_vendas(file_vendas)
-        except Exception as e:
-            st.error(f"Erro ao carregar vendas: {e}")
-
-    tabs = st.tabs([
+    # ── Tabs principais ──────────────────────────────────────
+    tab1, tab2, tab3 = st.tabs([
         "📦 Estoque & ABC",
         "📈 Vendas & Demanda",
-        "📊 Cobertura",
         "🛒 Sugestão de Compras",
-        "🏭 Fornecedores"
     ])
 
-    with tabs[0]:
-        if not estoque_df.empty:
-            aba_estoque(estoque_df)
-        else:
-            st.info("Carregue o arquivo de estoque.")
+    # ════════════════════════════════════════════════════════
+    # TAB 1 — ESTOQUE & ABC
+    # ════════════════════════════════════════════════════════
+    with tab1:
+        st.subheader("📦 Estoque & ABC")
 
-    with tabs[1]:
-        if not vendas_df.empty:
-            aba_vendas(vendas_df)
-        else:
-            st.info("Carregue o arquivo de vendas.")
+        # Filtros
+        col_f1, col_f2, col_f3 = st.columns(3)
+        with col_f1:
+            fabricantes_disp = sorted(df_estoque["fabricante_nome"].unique())
+            fab_sel = st.multiselect("Filtrar fabricante", fabricantes_disp, default=fabricantes_disp)
+        with col_f2:
+            abc_disp = sorted(df_estoque["abc"].dropna().astype(str).unique()) if "abc" in df_estoque.columns else []
+            abc_sel  = st.multiselect("Curva ABC", abc_disp, default=abc_disp)
+        with col_f3:
+            mostrar_custo_zero = st.checkbox("Incluir itens com custo zero", value=True)
 
-    with tabs[2]:
-        aba_cobertura(estoque_df, vendas_df)
+        df_est_filt = df_estoque[df_estoque["fabricante_nome"].isin(fab_sel)].copy()
+        if abc_sel and "abc" in df_est_filt.columns:
+            df_est_filt = df_est_filt[df_est_filt["abc"].astype(str).isin(abc_sel)]
+        if not mostrar_custo_zero:
+            df_est_filt = df_est_filt[~df_est_filt["flag_custo_zero"]]
 
-    with tabs[3]:
-        aba_sugestao(estoque_df, vendas_df)
+        # KPIs
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("SKUs",            f"{df_est_filt['sku'].nunique():,}")
+        k2.metric("Unidades totais", f"{df_est_filt['qtde_estoque'].sum():,.0f}")
+        k3.metric("Valor de estoque",f"R$ {df_est_filt['custo_total'].sum():,.0f}")
+        k4.metric("Itens custo zero",f"{df_est_filt['flag_custo_zero'].sum():,}")
 
-    with tabs[4]:
-        aba_fornecedores(estoque_df)
+        # Gráfico por fabricante
+        resumo_fab = (
+            df_est_filt.groupby("fabricante_nome")
+            .agg(skus=("sku", "nunique"), unidades=("qtde_estoque", "sum"), valor=("custo_total", "sum"))
+            .reset_index()
+            .sort_values("valor", ascending=False)
+        )
+
+        fig_fab = px.bar(
+            resumo_fab, x="fabricante_nome", y="valor",
+            color="fabricante_nome",
+            labels={"fabricante_nome": "Fabricante", "valor": "Valor (R$)"},
+            title="Valor de estoque por fabricante",
+            text_auto=".2s",
+        )
+        fig_fab.update_layout(showlegend=False)
+        st.plotly_chart(fig_fab, use_container_width=True)
+
+        # Tabela detalhada
+        with st.expander("Ver tabela completa de estoque"):
+            cols_show = [c for c in ["fabricante_nome", "sku", "descricao", "abc",
+                                      "qtde_estoque", "custo_unitario", "custo_total", "flag_custo_zero"]
+                         if c in df_est_filt.columns]
+            st.dataframe(df_est_filt[cols_show].reset_index(drop=True), use_container_width=True)
+
+        # Download
+        st.download_button(
+            "⬇️ Exportar estoque (CSV)",
+            df_est_filt.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+            "estoque_base_app.csv",
+            "text/csv",
+        )
+
+    # ════════════════════════════════════════════════════════
+    # TAB 2 — VENDAS & DEMANDA
+    # ════════════════════════════════════════════════════════
+    with tab2:
+        st.subheader("📈 Vendas & Demanda")
+
+        # Filtros de período
+        anos_disp = sorted(df_vendas["ano"].unique(), reverse=True)
+        col_v1, col_v2, col_v3 = st.columns(3)
+
+        with col_v1:
+            ano_sel = st.selectbox("Ano", anos_disp, index=0)
+
+        df_ano = df_vendas[df_vendas["ano"] == ano_sel]
+        meses_ano    = sorted(df_ano["mes"].unique())
+        meses_labels = [f"{m:02d}/{ano_sel}" for m in meses_ano]
+
+        with col_v2:
+            default_idx = meses_ano.index(3) if 3 in meses_ano else 0
+            mes_label_sel = st.selectbox("Mês", meses_labels, index=default_idx)
+
+        mes_sel = meses_ano[meses_labels.index(mes_label_sel)]
+
+        with col_v3:
+            marcas_disp = sorted(df_vendas["marca_norm"].unique())
+            marcas_sel  = st.multiselect("Marcas", marcas_disp, default=marcas_disp)
+
+        df_mes = df_ano[
+            (df_ano["mes"] == mes_sel) &
+            (df_ano["marca_norm"].isin(marcas_sel))
+        ]
+
+        # KPIs do mês
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Faturamento do mês", f"R$ {df_mes['vl_total'].sum():,.0f}")
+        k2.metric("Pedidos (linhas)",    f"{len(df_mes):,}")
+        k3.metric("Qtde vendida",        f"{df_mes['qtde_venda'].sum():,.0f}")
+
+        # Vendas por marca no mês
+        venda_marca = (
+            df_mes.groupby("marca_norm")["vl_total"]
+            .sum()
+            .reset_index()
+            .sort_values("vl_total", ascending=False)
+        )
+
+        fig_marca = px.bar(
+            venda_marca, x="marca_norm", y="vl_total",
+            color="marca_norm",
+            labels={"marca_norm": "Marca", "vl_total": "Faturamento (R$)"},
+            title=f"Faturamento por marca — {mes_label_sel}",
+            text_auto=".2s",
+        )
+        fig_marca.update_layout(showlegend=False)
+        st.plotly_chart(fig_marca, use_container_width=True)
+
+        # Evolução mensal do ano
+        st.markdown("#### Evolução mensal do ano")
+        evo_mensal = (
+            df_ano[df_ano["marca_norm"].isin(marcas_sel)]
+            .groupby(["mes", "marca_norm"])["vl_total"]
+            .sum()
+            .reset_index()
+        )
+        fig_evo = px.line(
+            evo_mensal, x="mes", y="vl_total", color="marca_norm",
+            labels={"mes": "Mês", "vl_total": "Faturamento (R$)", "marca_norm": "Marca"},
+            title=f"Evolução mensal {ano_sel}",
+            markers=True,
+        )
+        st.plotly_chart(fig_evo, use_container_width=True)
+
+        # Tabela de SKUs mais vendidos no mês
+        with st.expander("Ver SKUs mais vendidos no mês"):
+            top_skus = (
+                df_mes.groupby(["sku", "descricao", "marca_norm"])
+                .agg(qtde=("qtde_venda", "sum"), valor=("vl_total", "sum"))
+                .reset_index()
+                .sort_values("valor", ascending=False)
+                .head(50)
+            )
+            st.dataframe(top_skus.reset_index(drop=True), use_container_width=True)
+
+        # Download
+        st.download_button(
+            "⬇️ Exportar vendas do mês (CSV)",
+            df_mes.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+            f"vendas_{mes_label_sel.replace('/', '_')}.csv",
+            "text/csv",
+        )
+
+    # ════════════════════════════════════════════════════════
+    # TAB 3 — SUGESTÃO DE COMPRAS
+    # ════════════════════════════════════════════════════════
+    with tab3:
+        st.subheader("🛒 Sugestão de Compras")
+
+        # Parâmetros
+        col_p1, col_p2, col_p3 = st.columns(3)
+        with col_p1:
+            meses_base = st.slider("Meses base para demanda média", 1, 12, 3)
+        with col_p2:
+            cobertura_meta = st.number_input("Cobertura desejada (dias)", value=COBERTURA_META_DIAS, step=5)
+        with col_p3:
+            lead_time = st.number_input("Lead time (dias)", value=LEAD_TIME_DIAS, step=5)
+
+        # Demanda média mensal por SKU (últimos N meses disponíveis)
+        datas_disp = df_vendas["ano_mes"].sort_values().unique()
+        ultimos_meses = datas_disp[-meses_base:] if len(datas_disp) >= meses_base else datas_disp
+
+        df_base = df_vendas[df_vendas["ano_mes"].isin(ultimos_meses)]
+        demanda_sku = (
+            df_base.groupby("sku")["qtde_venda"]
+            .sum()
+            .div(len(ultimos_meses))
+            .reset_index()
+            .rename(columns={"qtde_venda": "demanda_media_mensal"})
+        )
+
+        # Junta com estoque
+        df_sug = df_estoque[["sku", "fabricante_nome", "descricao", "qtde_estoque", "custo_unitario", "custo_total", "flag_custo_zero"]].copy()
+        df_sug = df_sug.merge(demanda_sku, on="sku", how="left")
+        df_sug["demanda_media_mensal"] = df_sug["demanda_media_mensal"].fillna(0)
+
+        # Demanda diária e cobertura atual
+        df_sug["demanda_diaria"]     = df_sug["demanda_media_mensal"] / 30
+        df_sug["cobertura_atual_dias"] = np.where(
+            df_sug["demanda_diaria"] > 0,
+            df_sug["qtde_estoque"] / df_sug["demanda_diaria"],
+            np.inf,
+        )
+
+        # Estoque necessário para cobertura desejada + lead time
+        df_sug["estoque_necessario"] = np.ceil(
+            df_sug["demanda_diaria"] * (cobertura_meta + lead_time)
+        )
+
+        # Quantidade a comprar
+        df_sug["qtde_comprar"] = np.maximum(
+            0,
+            df_sug["estoque_necessario"] - df_sug["qtde_estoque"]
+        ).astype(int)
+
+        # Valor estimado de compra
+        df_sug["valor_estimado"] = df_sug["qtde_comprar"] * df_sug["custo_unitario"]
+
+        # Filtros
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            fab_sug = st.multiselect(
+                "Fabricante",
+                sorted(df_sug["fabricante_nome"].unique()),
+                default=sorted(df_sug["fabricante_nome"].unique()),
+            )
+        with col_s2:
+            apenas_necessarios = st.checkbox("Mostrar apenas SKUs que precisam de compra", value=True)
+
+        df_s = df_sug[df_sug["fabricante_nome"].isin(fab_sug)]
+        if apenas_necessarios:
+            df_s = df_s[df_s["qtde_comprar"] > 0]
+
+        # KPIs
+        k1, k2, k3 = st.columns(3)
+        k1.metric("SKUs p/ comprar",      f"{(df_s['qtde_comprar'] > 0).sum():,}")
+        k2.metric("Unidades p/ comprar",  f"{df_s['qtde_comprar'].sum():,.0f}")
+        k3.metric("Valor est. compra",    f"R$ {df_s['valor_estimado'].sum():,.0f}")
+
+        # Tabela
+        cols_sug = [
+            "fabricante_nome", "sku", "descricao",
+            "qtde_estoque", "demanda_media_mensal",
+            "cobertura_atual_dias", "estoque_necessario",
+            "qtde_comprar", "custo_unitario", "valor_estimado",
+            "flag_custo_zero",
+        ]
+        cols_sug = [c for c in cols_sug if c in df_s.columns]
+
+        st.dataframe(
+            df_s[cols_sug]
+            .sort_values("valor_estimado", ascending=False)
+            .reset_index(drop=True),
+            use_container_width=True,
+        )
+
+        # Download
+        st.download_button(
+            "⬇️ Exportar sugestão de compras (CSV)",
+            df_s[cols_sug].to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+            "sugestao_compras.csv",
+            "text/csv",
+        )
 
 
 if __name__ == "__main__":
