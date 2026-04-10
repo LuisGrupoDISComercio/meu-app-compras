@@ -260,28 +260,28 @@ def aba_estoque(estoque_df: pd.DataFrame):
 
     st.divider()
 
-    # ── Estoque por fabricante ─────────────────────────────────────────────
+        # ── Estoque por fabricante ─────────────────────────────────────────────
     st.subheader("Estoque por fabricante")
     fab_group = (
         estoque_df.groupby("fabricante_nome")
         .agg(
-            SKUs       =("produto_id",  "count"),
-            Pecas      =("qtde",        "sum"),
-            Valor_R$   =("custo_total", "sum"),
+            SKUs  =("produto_id",  "count"),
+            Pecas =("qtde",        "sum"),
+            Valor =("custo_total", "sum"),
         )
         .reset_index()
-        .sort_values("Valor_R$", ascending=False)
+        .sort_values("Valor", ascending=False)
     )
-    fab_group["Valor_R$_fmt"] = fab_group["Valor_R$"].apply(lambda x: f"R$ {x:,.0f}")
+    fab_group["Valor_fmt"] = fab_group["Valor"].apply(lambda x: f"R$ {x:,.0f}")
 
     col_tabela, col_pizza = st.columns([1, 1])
     with col_tabela:
         st.dataframe(
             fab_group.rename(columns={
                 "fabricante_nome": "Fabricante",
-                "SKUs": "SKUs",
-                "Pecas": "Qtde",
-                "Valor_R$_fmt": "Valor (R$)"
+                "SKUs":            "SKUs",
+                "Pecas":           "Qtde",
+                "Valor_fmt":       "Valor (R$)",
             })[["Fabricante", "SKUs", "Qtde", "Valor (R$)"]],
             use_container_width=True,
             hide_index=True,
@@ -290,7 +290,7 @@ def aba_estoque(estoque_df: pd.DataFrame):
         fig_fab = px.pie(
             fab_group,
             names="fabricante_nome",
-            values="Valor_R$",
+            values="Valor",
             title="Participação por valor (R$)",
             hole=0.4,
         )
