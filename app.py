@@ -1,4 +1,4 @@
-import streamlit as st
+ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -539,4 +539,94 @@ def aba_sugestao(estoque_df, vendas_df):
 
         st.markdown("---")
         st.metric("Total de SKUs com sugestão", fmt_qtde(len(df_show)))
-        st.dataframe(df_show, use_cont
+        st.dataframe(df_show, use_container_width=True, height=500)
+    else:
+        st.warning("Dados insuficientes para sugestão de compra.")
+
+
+# ─────────────────────────────────────────────
+# ABA FORNECEDORES
+# ─────────────────────────────────────────────
+def aba_fornecedores(estoque_df):
+    st.title("🏭 Fornecedores")
+
+    if estoque_df.empty:
+        st.info("Carregue o arquivo de estoque.")
+        return
+
+    if "fabricante" in estoque_df.columns:
+        resumo = estoque_df.groupby("fabricante").agg(
+            skus=("produto", "nunique"),
+            unidades=("qtde", "sum"),
+            valor_total=("custo_total", "sum") if "custo_total" in estoque_df.columns else ("qtde", "sum"),
+        ).reset_index().sort_values("valor_total", ascending=False)
+
+        resumo["valor_total"] = resumo["valor_total"].apply(fmt_brl)
+        resumo.columns = ["Fabricante", "SKUs", "Unidades", "Valor Total (R$)"]
+
+        st.dataframe(resumo, use_container_width=True)
+
+        for _, row in resumo.iterrows():
+            fab = row["Fabricante"]
+            if fab in LOGOS:
+                try:
+                    st.image(LOGOS[fab], width=120, caption=fab)
+                except Exception:
+                    pass
+
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
+def main():
+    # ── Logo ──
+    try:
+        st.sidebar.image(LOGOS["Grupo"], use_container_width=True)
+    except Exception:
+        pass
+
+    st.sidebar.title("Motor de Compras ❄️")
+    st.sidebar.markdown("---")
+
+    # ── Upload Estoque ──
+    st.sidebar.markdown("📁 **Estoque (.xlsx)**")
+    estoque_file = st.sidebar.file_uploader("", type=["xlsx"], key="up_estoque", label_visibility="collapsed")
+    estoque_df = pd.DataFrame()
+    if estoque_file:
+        with st.spinner("Carregando estoque..."):
+            estoque_df = carregar_estoque(estoque_file)
+        if not estoque_df.empty:
+            st.sidebar.success(f"✅ Estoque: {fmt_qtde(len(estoque_df))} produtos carregados")
+        else:
+            st.sidebar.error("❌ Estoque: 0 produtos — verifique o arquivo")
+
+    # ── Upload Vendas ──
+    st.sidebar.markdown("📁 **Vendas (.csv)**")
+    vendas_file = st.sidebar.file_uploader("", type=["csv"], key="up_vendas", label_visibility="collapsed")
+    vendas_df = pd.DataFrame()
+    if vendas_file:
+        with st.spinner("Carregando vendas..."):
+            vendas_df = carregar_vendas(vendas_file)
+        if not vendas_df.empty:
+            st.sidebar.success(f"✅ Vendas: {fmt_qtde(len(vendas_df))} registros carregados")
+        else:
+            st.sidebar.error("❌ Vendas: 0 registros — verifique o arquivo")
+
+    # ── Tabs ──
+    tabs = st.tabs([
+        "📦 Estoque & ABC",
+        "📈 Vendas & Demanda",
+        "📊 Cobertura",
+        "🛒 Sugestão de Compra",
+        "🏭 Fornecedores",
+    ])
+
+    with tabs[0]: aba_estoque(estoque_df, vendas_df)
+    with tabs[1]: aba_vendas(vendas_df)
+    with tabs[2]: aba_cobertura(estoque_df, vendas_df)
+    with tabs[3]: aba_sugestao(estoque_df, vendas_df)
+    with tabs[4]: aba_fornecedores(estoque_df)
+
+
+if __name__ == "__main__":
+    main()
