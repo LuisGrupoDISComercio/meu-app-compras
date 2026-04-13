@@ -450,5 +450,46 @@ def main():
 
     st.sidebar.header("📂 Arquivos")
     est_file = st.sidebar.file_uploader("Estoque (.xlsx)", type=["xlsx"], key="est_up")
-    vnd_file = st.sidebar.file_uploader("Vendas (.csv)", type=["
+    vnd_file = st.sidebar.file_uploader("Vendas (.csv)", type=["csv"], key="vnd_up")
 
+    estoque_df = pd.DataFrame()
+    vendas_df = pd.DataFrame()
+
+    if est_file is not None:
+        estoque_df = carregar_estoque(est_file)
+        if not estoque_df.empty:
+            st.sidebar.success(f"✅ Estoque: {len(estoque_df)} produtos carregados")
+        else:
+            st.sidebar.error("❌ Estoque: 0 produtos — verifique o arquivo")
+
+    if vnd_file is not None:
+        vendas_df = carregar_vendas(vnd_file)
+        if not vendas_df.empty:
+            st.sidebar.success(
+                f"✅ Vendas: {len(vendas_df):,} registros carregados".replace(",", ".")
+            )
+        else:
+            st.sidebar.error("❌ Vendas: 0 registros — verifique o arquivo")
+
+    tabs = st.tabs([
+        "📦 Estoque & ABC",
+        "📈 Vendas & Demanda",
+        "📊 Cobertura",
+        "🛒 Sugestão de Compra",
+        "🏭 Fornecedores",
+    ])
+
+    with tabs[0]:
+        aba_estoque(estoque_df, vendas_df)
+    with tabs[1]:
+        aba_vendas(vendas_df)
+    with tabs[2]:
+        aba_cobertura(estoque_df, vendas_df)
+    with tabs[3]:
+        aba_sugestao(estoque_df, vendas_df)
+    with tabs[4]:
+        aba_fornecedores(estoque_df)
+
+
+if __name__ == "__main__":
+    main()
