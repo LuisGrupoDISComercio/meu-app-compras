@@ -50,9 +50,9 @@ def colorir_abc(classe):
 @st.cache_data
 def carregar_estoque(file_obj):
     """
-    Lê Estoque.xlsx e padroniza colunas:
-    produto, descricao, grupo, btu, ciclo, qtde,
-    vl_custo, vl_total (custo entrada total), marca, curva_sistema.
+    Lê Estoque.xlsx e padroniza:
+    produto, descricao, qtde, vl_total (Custo Entrada Total),
+    curva_sistema, marca, grupo, btu, ciclo, vl_custo.
     """
     try:
         df = pd.read_excel(file_obj, sheet_name=0, header=0, dtype=str)
@@ -74,14 +74,14 @@ def carregar_estoque(file_obj):
             elif lo in ("qtde", "qtd", "quantidade", "saldo"):
                 rename[col] = "qtde"
             # custo unitário
-            elif "vl custo" in lo or ("custo" in lo and "ult" in lo):
+            elif "custo entrada" in lo and "unit" in lo:
                 rename[col] = "vl_custo"
-            # NOVO: custo entrada total / custo total estoque
-            elif ("custo" in lo and "total" in lo) or ("entrada" in lo and "total" in lo):
+            # VALOR TOTAL DO ESTOQUE (Custo Entrada Total)
+            elif "custo entrada total" in lo or ("custo entrada" in lo and "to" in lo):
                 rename[col] = "vl_total"
             elif "vl total" in lo or "valor total" in lo:
                 rename[col] = "vl_total"
-            elif "marca" in lo or "fabricante" in lo:
+            elif "marca" in lo or "fabr" in lo or "fabricante" in lo:
                 rename[col] = "marca"
             elif lo in ("curva", "curva abc", "classe", "abc", "curva_abc"):
                 rename[col] = "curva_sistema"
@@ -94,42 +94,33 @@ def carregar_estoque(file_obj):
                 st.error(f"Estoque: coluna obrigatória '{c}' não encontrada.")
                 return pd.DataFrame()
 
-        # se não tiver custo unitário/total, cria para não quebrar
-        if "vl_custo" not in df.columns:
-            df["vl_custo"] = 0
-        if "vl_total" not in df.columns:
-            df["vl_total"] = 0
-
-        # numéricos
+        # numéricos – incluindo Custo Entrada Total já mapeado para vl_total
         for c in ["qtde", "vl_custo", "vl_total"]:
-            df[c] = (
-                df[c].astype(str)
-                .str.replace(r"\.", "", regex=True)
-                .str.replace(",", ".", regex=False)
-            )
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+            if c in df.columns:
+                df[c] = (
+                    df[c].astype(str)
+                    .str.replace(r"\.", "", regex=True)
+                    .str.replace(",", ".", regex=False)
+                )
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-        # se vl_total veio 0, mas existe custo unitário, calcula como qtde * vl_custo
-        if (df["vl_total"] == 0).all() and (df["vl_custo"] != 0).any():
-            df["vl_total"] = df["qtde"] * df["vl_custo"]
+        # NÃO recalcular vl_total se já veio da planilha
+        if "vl_total" not in df.columns and "vl_custo" in df.columns:
+            df["vl_total"] = df["qtde"].fillna(0) * df["vl_custo"].fillna(0)
+        elif "vl_total" not in df.columns:
+            df["vl_total"] = 0.0
 
+        # strings
         df["produto"] = df["produto"].astype(str).str.strip()
         if "descricao" in df.columns:
             df["descricao"] = df["descricao"].astype(str).str.strip()
         else:
             df["descricao"] = ""
 
-        if "curva_sistema" in df.columns:
-            df["curva_sistema"] = (
-                df["curva_sistema"].astype(str).str.strip().str.upper()
-            )
-
-        # filtra linhas válidas
         df = df[df["produto"].notna()]
-        df = df[df["qtde"].fillna(0) >= 0]
+        df = df[df["qtde"].fillna(0) > 0]
 
         return df.reset_index(drop=True)
-
     except Exception as e:
         st.error(f"Erro ao carregar estoque: {e}")
         return pd.DataFrame()
@@ -140,147 +131,118 @@ def carregar_estoque(file_obj):
 # =========================================================
 @st.cache_data
 def carregar_vendas(file_obj):
-    """
-    Lê Vendas.csv com separador ;, decimal ,.
-    Aceita com ou sem coluna Pedido.
-    """
     try:
-        df = pd.read_csv(
-            file_obj,
-            sep=";",
-            encoding="latin-1",
-            dtype=str,
-            skip_blank_lines=True,
-        )
-        df.columns = df.columns.astype(str).str.strip()
+        df = pd.read_csv(file_obj, sep=";", decimal=",", encoding="latin1")
+    except Exception:
+        df = pd.read_csv(file_obj, sep=";", decimal=",")
+    df.columns = df.columns.astype(str).str.strip()
 
-        rename = {}
-        for col in df.columns:
-            lo = col.lower()
-            if "emiss" in lo:
-                rename[col] = "data"
-            elif lo == "pedido":
-                rename[col] = "pedido"
-            elif "marca" in lo:
-                rename[col] = "marca"
-            elif "grupo" in lo:
-                rename[col] = "grupo"
-            elif "btu" in lo:
-                rename[col] = "btu"
-            elif "ciclo" in lo:
-                rename[col] = "ciclo"
-            elif lo == "produto":
-                rename[col] = "produto"
-            elif "descri" in lo:
-                rename[col] = "descricao"
-            elif lo in ("qtde", "qtd", "quantidade"):
-                rename[col] = "qtde"
-            elif "vl custo" in lo or ("custo" in lo and "ult" in lo):
-                rename[col] = "vl_custo"
-            elif "vl total" in lo or "valor total" in lo:
-                rename[col] = "vl_total"
+    rename = {}
+    for col in df.columns:
+        lo = col.lower()
+        if "emissao" in lo:
+            rename[col] = "data"
+        elif lo == "marca":
+            rename[col] = "marca"
+        elif lo == "grupo":
+            rename[col] = "grupo"
+        elif "btu" in lo:
+            rename[col] = "btu"
+        elif "ciclo" in lo:
+            rename[col] = "ciclo"
+        elif lo == "produto":
+            rename[col] = "produto"
+        elif "descri" in lo:
+            rename[col] = "descricao"
+        elif lo in ("qtde", "qtd", "quantidade"):
+            rename[col] = "qtde"
+        elif "vl custo" in lo or ("custo" in lo and "ult" in lo):
+            rename[col] = "vl_custo"
+        elif "vl total" in lo or "valor total" in lo:
+            rename[col] = "vl_total"
+        elif "pedido" in lo:
+            rename[col] = "pedido"
 
-        df = df.rename(columns=rename)
+    df = df.rename(columns=rename)
 
-        for c in ["qtde", "vl_custo", "vl_total"]:
-            if c in df.columns:
-                df[c] = (
-                    df[c].astype(str)
-                    .str.replace(r"\.", "", regex=True)
-                    .str.replace(",", ".", regex=False)
-                )
-                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    if "data" in df.columns:
+        df["data"] = pd.to_datetime(df["data"], errors="coerce", dayfirst=True)
 
-        if "data" in df.columns:
-            df["data"] = pd.to_datetime(df["data"], errors="coerce", dayfirst=True)
+    for c in ["qtde", "vl_custo", "vl_total"]:
+        if c in df.columns:
+            df[c] = (
+                df[c].astype(str)
+                .str.replace(r"\.", "", regex=True)
+                .str.replace(",", ".", regex=False)
+            )
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-        if "descricao" in df.columns:
-            df["descricao"] = df["descricao"].astype(str)
+    if "produto" in df.columns:
+        df["produto"] = df["produto"].astype(str).str.strip()
+    if "descricao" in df.columns:
+        df["descricao"] = df["descricao"].astype(str).str.strip()
 
-        return df.reset_index(drop=True)
-
-    except Exception as e:
-        st.error(f"Erro ao carregar vendas: {e}")
-        return pd.DataFrame()
+    return df.reset_index(drop=True)
 
 
 # =========================================================
-# ABC IA
+# ABC
 # =========================================================
 def calcular_abc(df, col_qtde="qtde", col_valor="vl_total"):
     base = df.copy()
     base[col_qtde] = base[col_qtde].fillna(0)
 
-    # ABC por unidades
-    unid = (
-        base.groupby("produto", as_index=False)[col_qtde]
-        .sum()
-        .rename(columns={col_qtde: "qtde_total"})
-        .sort_values("qtde_total", ascending=False)
+    agrup_qtd = (
+        base.groupby("produto", as_index=False)[col_qtde].sum().rename(
+            columns={col_qtde: "qtde_total"}
+        )
     )
-    soma_unid = unid["qtde_total"].sum()
-    unid["perc_unid"] = np.where(
-        soma_unid > 0, unid["qtde_total"] / soma_unid * 100, 0
-    )
-    unid["perc_unid_acum"] = unid["perc_unid"].cumsum()
+    agrup_qtd = agrup_qtd.sort_values("qtde_total", ascending=False)
+    agrup_qtd["perc_qtde"] = agrup_qtd["qtde_total"] / agrup_qtd["qtde_total"].sum()
+    agrup_qtd["perc_qtde_acum"] = agrup_qtd["perc_qtde"].cumsum()
 
-    def classe_unid(p):
-        if p <= 80:
+    def class_abc_q(p):
+        if p <= 0.8:
             return "A"
-        elif p <= 95:
+        elif p <= 0.95:
             return "B"
         else:
             return "C"
 
-    unid["classe_unid"] = unid["perc_unid_acum"].apply(classe_unid)
+    agrup_qtd["classe_unid"] = agrup_qtd["perc_qtde_acum"].apply(class_abc_q)
 
-    # ABC por valor (se houver)
-    if col_valor in base.columns:
-        base[col_valor] = base[col_valor].fillna(0)
-        val = (
-            base.groupby("produto", as_index=False)[col_valor]
-            .sum()
-            .rename(columns={col_valor: "valor_total"})
-            .sort_values("valor_total", ascending=False)
+    if col_valor and col_valor in base.columns and base[col_valor].abs().sum() > 0:
+        agrup_val = (
+            base.groupby("produto", as_index=False)[col_valor].sum().rename(
+                columns={col_valor: "valor_total"}
+            )
         )
-        soma_val = val["valor_total"].sum()
-        val["perc_val"] = np.where(
-            soma_val > 0, val["valor_total"] / soma_val * 100, 0
+        agrup_val = agrup_val.sort_values("valor_total", ascending=False)
+        agrup_val["perc_valor"] = (
+            agrup_val["valor_total"] / agrup_val["valor_total"].sum()
         )
-        val["perc_val_acum"] = val["perc_val"].cumsum()
+        agrup_val["perc_valor_acum"] = agrup_val["perc_valor"].cumsum()
 
-        def classe_val(p):
-            if p <= 80:
+        def class_abc_v(p):
+            if p <= 0.8:
                 return "A"
-            elif p <= 95:
+            elif p <= 0.95:
                 return "B"
             else:
                 return "C"
 
-        val["classe_valor"] = val["perc_val_acum"].apply(classe_val)
-
-        merged = base.merge(
-            unid[["produto", "classe_unid"]],
-            on="produto",
-            how="left",
-        ).merge(
-            val[["produto", "classe_valor"]],
-            on="produto",
-            how="left",
-        )
+        agrup_val["classe_valor"] = agrup_val["perc_valor_acum"].apply(class_abc_v)
     else:
-        merged = base.merge(
-            unid[["produto", "classe_unid"]],
-            on="produto",
-            how="left",
+        agrup_val = pd.DataFrame(
+            {"produto": agrup_qtd["produto"], "valor_total": 0, "classe_valor": None}
         )
-        merged["classe_valor"] = None
 
-    return merged
+    df_abc = pd.merge(agrup_qtd, agrup_val, on="produto", how="left")
+    return df_abc
 
 
 # =========================================================
-# ABA ESTOQUE & ABC
+# ABA ESTOQUE & ABC IA
 # =========================================================
 def aba_estoque(estoque_df, vendas_df):
     st.header("📦 Estoque & ABC IA")
@@ -289,36 +251,35 @@ def aba_estoque(estoque_df, vendas_df):
         st.warning("Carregue o arquivo de estoque.")
         return
 
-    df = estoque_df.copy()
-    df_abc = calcular_abc(df, col_qtde="qtde", col_valor="vl_total")
-
-    qtd_total = df_abc["qtde"].sum()
-    valor_total = df_abc["vl_total"].sum() if "vl_total" in df_abc.columns else 0
-    skus = df_abc["produto"].nunique()
+    qtd_total = estoque_df["qtde"].sum()
+    valor_total = estoque_df["vl_total"].sum() if "vl_total" in estoque_df.columns else 0
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("SKUs em estoque", fmt_qtde(skus))
+    col1.metric("SKUs em estoque", fmt_qtde(estoque_df["produto"].nunique()))
     col2.metric("Qtd total em estoque", fmt_qtde(qtd_total))
-    col3.metric(
-        "Valor total em estoque",
-        fmt_brl(valor_total) if valor_total > 0 else "—",
-    )
+    if valor_total > 0:
+        col3.metric("Valor total em estoque", fmt_brl(valor_total))
+    else:
+        col3.metric("Valor total em estoque", "—")
 
-    # Curva sistema agregada
-    if "curva_sistema" in df_abc.columns:
+    # Curva sistema (contagem)
+    if "curva_sistema" in estoque_df.columns:
         dist = (
-            df_abc["curva_sistema"]
-            .fillna("X")
+            estoque_df["curva_sistema"]
             .astype(str)
-            .str.upper()
+            .str.strip()
             .value_counts()
             .sort_index()
         )
-        curva_txt = ", ".join(f"{k}: {v}" for k, v in dist.items())
-        st.markdown(f"**Curva Sistema (SKUs):** {curva_txt}")
+        resumo_curva = ", ".join([f"{k}: {v}" for k, v in dist.items()])
+        st.markdown(f"**Curva Sistema (SKUs):** {resumo_curva}")
 
     st.markdown("---")
     st.subheader("Detalhe por produto (ABC IA x Curva Sistema)")
+
+    df = estoque_df.copy()
+    df_abc = calcular_abc(df, col_qtde="qtde", col_valor="vl_total")
+    df = df.merge(df_abc[["produto", "classe_unid", "classe_valor"]], on="produto", how="left")
 
     cols = [
         "produto",
@@ -328,18 +289,17 @@ def aba_estoque(estoque_df, vendas_df):
         "classe_unid",
         "classe_valor",
     ]
-    cols = [c for c in cols if c in df_abc.columns]
-    view = df_abc[cols].copy()
+    cols = [c for c in cols if c in df.columns]
+    df_view = df[cols].copy()
+    df_view["qtde"] = df_view["qtde"].apply(fmt_qtde)
 
-    view["qtde"] = view["qtde"].apply(fmt_qtde)
-
-    styler = view.style
-    if "classe_unid" in view.columns:
+    styler = df_view.style
+    if "classe_unid" in df_view.columns:
         styler = styler.map(colorir_abc, subset=["classe_unid"])
-    if "classe_valor" in view.columns:
+    if "classe_valor" in df_view.columns:
         styler = styler.map(colorir_abc, subset=["classe_valor"])
 
-    st.dataframe(styler, use_container_width=True, height=600)
+    st.dataframe(styler, use_container_width=True, height=550)
 
 
 # =========================================================
@@ -379,7 +339,7 @@ def aba_vendas(vendas_df):
                 x="ano_mes",
                 y="valor",
                 title="Valor vendido por mês",
-                labels={"ano_mes": "Mês", "valor": "R$"},
+                labels={"ano_mes": "Ano-Mês", "valor": "R$"},
             )
             st.plotly_chart(fig1, use_container_width=True)
         with col2:
@@ -389,7 +349,7 @@ def aba_vendas(vendas_df):
                 y="qtde",
                 markers=True,
                 title="Unidades vendidas por mês",
-                labels={"ano_mes": "Mês", "qtde": "Unid"},
+                labels={"ano_mes": "Ano-Mês", "qtde": "Unid"},
             )
             st.plotly_chart(fig2, use_container_width=True)
 
@@ -419,7 +379,7 @@ def aba_vendas(vendas_df):
 
 
 # =========================================================
-# OUTRAS ABAS
+# ABAS PLACEHOLDER
 # =========================================================
 def aba_cobertura(estoque_df, vendas_df):
     st.header("📊 Cobertura")
