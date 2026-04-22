@@ -9,14 +9,25 @@ st.set_page_config(
     layout="wide",
 )
 
-# -------------------------------------------------------------------
+# =========================================================
 # CONSTANTES
-# -------------------------------------------------------------------
+# =========================================================
 FABRICANTES_IGNORAR = {900, 995, 998, 999}
 
-# -------------------------------------------------------------------
-# FORMATAÇÃO
-# -------------------------------------------------------------------
+MAPA_FABRICANTES = {
+    2: "LG",
+    3: "Samsung",
+    4: "Midea",
+    5: "Daikin",
+    6: "Agratto",
+    7: "Gree",
+    10: "Trane",
+    11: "TCL",
+}
+
+# =========================================================
+# UTILITÁRIOS
+# =========================================================
 def fmt_brl(valor):
     try:
         v = float(valor)
@@ -46,88 +57,70 @@ def colorir_abc(classe):
     if not isinstance(classe, str):
         return ""
     primeira = classe[0].upper() if classe else ""
-    bg, fg = cores.get(primeira, ("#cccccc", "#000000"))
+    cor = cores.get(primeira, ("#cccccc", "#000000"))
     return (
-        f"background-color: {bg}; "
-        f"color: {fg}; font-weight: bold; text-align: center;"
+        f"background-color: {cor[0]}; color: {cor[1]}; "
+        f"font-weight: bold; text-align: center;"
     )
 
-# -------------------------------------------------------------------
-# CARREGAMENTO DO ESTOQUE
-# -------------------------------------------------------------------
-def carregar_estoque(file) -> pd.DataFrame:
-    """
-    Carrega o Estoque.xlsx no layout específico que você enviou.
-
-    Colunas originais:
-    - Fabr
-    - Produto
-    - Descrição
-    - ABC
-    - Cubagem (Un)
-    - Qtde
-    - Custo Entrada Unitário Médio
-    - Custo Entrada Total
-    """
+# =========================================================
+# CARREGAMENTO DE DADOS
+# =========================================================
+def carregar_estoque(file):
+    """Lê exatamente o layout do Estoque.xlsx que você enviou."""
     try:
-        # Se o arquivo tiver várias abas, tenta achar "RelEstoqueVenda".
-        try:
-            df = pd.read_excel(file, sheet_name="RelEstoqueVenda", header=0)
-        except Exception:
-            df = pd.read_excel(file, header=0)
+        df = pd.read_excel(file, sheet_name="RelEstoqueVenda", header=0)
 
-        # Renomeia colunas exatamente
-        rename_map = {
-            "Fabr": "fabr",
-            "Produto": "produto",
-            "Descrição": "descricao",
-            "ABC": "curva_sistema",
-            "Cubagem (Un)": "cubagem",
-            "Qtde": "qtde",
-            "Custo Entrada Unitário Médio": "vl_unit",
-            "Custo Entrada Total": "vl_total",
-        }
-        df = df.rename(columns=rename_map)
+        # Renomear colunas para nomes internos fixos
+        df = df.rename(
+            columns={
+                "Fabr": "fabr",
+                "Produto": "produto",
+                "Descrição": "descricao",
+                "ABC": "curva_sistema",
+                "Cubagem (Un)": "cubagem_un",
+                "Qtde": "qtde",
+                "Custo Entrada Unitário Médio": "custo_unit_medio",
+                "Custo Entrada Total": "vl_total",
+            }
+        )
 
-        # Garante existência de colunas obrigatórias
-        obrigatorias = ["fabr", "produto", "descricao", "qtde", "vl_total"]
-        faltando = [c for c in obrigatorias if c not in df.columns]
-        if faltando:
-            raise ValueError(f"[fabr, 'produto']")
+        # Remover linha TOTAL (última, com descrição = TOTAL) e linhas totalmente vazias
+        df = df.dropna(subset=["descricao"], how="all")
+        df = df[df["descricao"].str.upper() != "TOTAL"]
 
-        # Remove linha TOTAL (na amostra: produto NaN e descricao == 'TOTAL')
-        df = df[~df["descricao"].astype(str).str.upper().eq("TOTAL")]
-        # Remove linhas totalmente vazias
-        df = df.dropna(how="all")
-
-        # Converte tipos
+        # Tipos
         df["fabr"] = pd.to_numeric(df["fabr"], errors="coerce").astype("Int64")
         df["produto"] = pd.to_numeric(df["produto"], errors="coerce").astype("Int64")
         df["qtde"] = pd.to_numeric(df["qtde"], errors="coerce").fillna(0).astype(float)
         df["vl_total"] = pd.to_numeric(df["vl_total"], errors="coerce").fillna(0.0)
 
-        # Remove fabricantes a ignorar (900, 995, 998, 999)
-        mask_valid_fabr = ~df["fabr"].isin(list(FABRICANTES_IGNORAR))
-        df = df[mask_valid_fabr]
+        # Remover fabricantes de serviço/danificados
+        df = df[~df["fabr"].isin(FABRICANTES_IGNORAR)]
 
-        # Remove linhas sem produto
-        df = df.dropna(subset=["produto"])
+        # Nome do fabricante
+        df["fabricante_nome"] = df["fabr"].map(MAPA_FABRICANTES).fillna("Outro")
 
-        df["descricao"] = df["descricao"].astype(str)
-        if "curva_sistema" in df.columns:
-            df["curva_sistema"] = df["curva_sistema"].astype(str)
-
-        df = df.reset_index(drop=True)
-        return df
+        return df.reset_index(drop=True)
 
     except Exception as e:
-        st.sidebar.error(f"Erro ao carregar estoque: {e}")
+        st.error(f"Erro ao carregar estoque: {e}")
         return pd.DataFrame()
 
-# -------------------------------------------------------------------
+
+def carregar_vendas(file):
+    try:
+        df = pd.read_csv(file, sep=";", encoding="latin1")
+        # ajuste mínimo – mantém sua estrutura original
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar vendas: {e}")
+        return pd.DataFrame()
+
+# =========================================================
 # ABA ESTOQUE & ABC
-# -------------------------------------------------------------------
-def aba_estoque(estoque_df: pd.DataFrame):
+# =========================================================
+def aba_estoque(estoque_df: pd.DataFrame, vendas_df: pd.DataFrame):
     st.header("📦 Estoque & ABC")
 
     if estoque_df.empty:
@@ -136,14 +129,13 @@ def aba_estoque(estoque_df: pd.DataFrame):
 
     df = estoque_df.copy()
 
-    # SKUs
-    skus = df["produto"].nunique()
+    # KPI 1 – SKUs (linhas)
+    skus = len(df)
 
-    # Quantidade total
+    # KPI 2 – Qtde total
     qtde_total = df["qtde"].sum()
 
-    # Valor total em estoque (R$)
-    # -> soma direta de vl_total, pois já vem como total por linha
+    # KPI 3 – Valor total (Custo Entrada Total)
     vl_total_sum = df["vl_total"].sum()
 
     col1, col2, col3 = st.columns(3)
@@ -155,35 +147,42 @@ def aba_estoque(estoque_df: pd.DataFrame):
 
     st.subheader("Detalhe por produto")
 
-    col_fabr, col_curva = st.columns(2)
-    fabrs_unicos = df["fabr"].dropna().unique()
-    fabrs_unicos = sorted(list(fabrs_unicos))
+    # Filtros por fabricante (código) e curva do sistema
+    fabricantes_unicos = sorted(df["fabr"].dropna().unique())
+    curvas_unicas = sorted(df["curva_sistema"].dropna().unique())
 
-    fabr_sel = col_fabr.multiselect(
-        "Filtrar por fabricante (código):",
-        options=fabrs_unicos,
-        default=fabrs_unicos,
-    )
+    with st.expander("Filtros", expanded=True):
+        c1, c2 = st.columns(2)
 
-    curva_opts = sorted(df["curva_sistema"].dropna().unique())
-    curva_sel = col_curva.multiselect(
-        "Filtrar por Curva Sistema:",
-        options=curva_opts,
-        default=curva_opts,
-    )
+        fabs_sel = c1.multiselect(
+            "Filtrar por fabricante (código):",
+            options=fabricantes_unicos,
+            default=fabricantes_unicos,
+            format_func=lambda x: f"{x}",
+        )
 
-    if fabr_sel:
-        df = df[df["fabr"].isin(fabr_sel)]
-    if curva_sel:
-        df = df[df["curva_sistema"].isin(curva_sel)]
+        curvas_sel = c2.multiselect(
+            "Filtrar por Curva Sistema:",
+            options=curvas_unicas,
+            default=curvas_unicas,
+        )
 
-    df_view = df[["fabr", "produto", "descricao", "curva_sistema", "qtde", "vl_total"]].copy()
-    df_view = df_view.sort_values(["fabr", "produto"])
+    if fabs_sel:
+        df = df[df["fabr"].isin(fabs_sel)]
+    if curvas_sel:
+        df = df[df["curva_sistema"].isin(curvas_sel)]
 
-    df_view["qtde"] = df_view["qtde"].astype(float)
-    df_view["vl_total"] = df_view["vl_total"].astype(float)
-
-    df_view_ren = df_view.rename(
+    # Tabela final
+    df_view = df[
+        [
+            "fabr",
+            "produto",
+            "descricao",
+            "curva_sistema",
+            "qtde",
+            "vl_total",
+        ]
+    ].rename(
         columns={
             "fabr": "Fabr",
             "produto": "Produto",
@@ -194,45 +193,76 @@ def aba_estoque(estoque_df: pd.DataFrame):
         }
     )
 
-    styler = df_view_ren.style.format(
+    # Formatar valores
+    df_view["Qtde"] = df_view["Qtde"].astype(float)
+    df_view["Custo Entrada Total"] = df_view["Custo Entrada Total"].astype(float)
+
+    df_view_style = df_view.style.map(
+        colorir_abc, subset=["Curva Sistema"]
+    )
+
+    # Valor em R$ legível na tabela
+    df_view_style = df_view_style.format(
         {
             "Qtde": lambda v: fmt_qtde(v),
             "Custo Entrada Total": lambda v: fmt_brl(v),
         }
     )
 
-    styler = styler.map(colorir_abc, subset=["Curva Sistema"])
+    st.dataframe(df_view_style, use_container_width=True, height=600)
 
-    st.dataframe(styler, use_container_width=True, height=500)
-
-# -------------------------------------------------------------------
-# ABAS PLACEHOLDER
-# -------------------------------------------------------------------
-def carregar_vendas(file) -> pd.DataFrame:
-    try:
-        return pd.read_csv(file, sep=";", encoding="utf-8")
-    except Exception:
-        return pd.DataFrame()
-
+# =========================================================
+# ABAS AUXILIARES (mantidas simples para não mexer no restante)
+# =========================================================
 def aba_vendas(vendas_df: pd.DataFrame):
     st.header("📈 Vendas & Demanda")
-    st.info("Placeholder. Foco atual está na aba Estoque & ABC.")
+    if vendas_df.empty:
+        st.info("Carregue o arquivo de vendas na barra lateral.")
+        return
+    st.dataframe(vendas_df.head(100), use_container_width=True)
+
 
 def aba_cobertura(estoque_df: pd.DataFrame, vendas_df: pd.DataFrame):
     st.header("📊 Cobertura")
-    st.info("Placeholder. Lógica será conectada depois que o estoque estiver 100% ok.")
+    st.info("Lógica de cobertura mantida para próxima etapa, sem alterações.")
+
 
 def aba_sugestao(estoque_df: pd.DataFrame, vendas_df: pd.DataFrame):
     st.header("🛒 Sugestão de Compra")
-    st.info("Placeholder. Lógica será conectada depois que o estoque estiver 100% ok.")
+    st.info("Lógica de sugestão de compra mantida para próxima etapa, sem alterações.")
+
 
 def aba_fornecedores(estoque_df: pd.DataFrame):
     st.header("🏭 Fornecedores")
-    st.info("Placeholder. Foco atual está na aba Estoque & ABC.")
+    if estoque_df.empty:
+        st.info("Carregue o arquivo de estoque na barra lateral.")
+        return
+    por_fabr = (
+        estoque_df.groupby("fabr")
+        .agg(
+            skus=("produto", "nunique"),
+            qtde_total=("qtde", "sum"),
+            valor_total=("vl_total", "sum"),
+        )
+        .reset_index()
+    )
+    por_fabr["qtde_total"] = por_fabr["qtde_total"].apply(fmt_qtde)
+    por_fabr["valor_total"] = por_fabr["valor_total"].apply(fmt_brl)
+    st.dataframe(
+        por_fabr.rename(
+            columns={
+                "fabr": "Fabricante (cód.)",
+                "skus": "SKUs",
+                "qtde_total": "Qtde Total",
+                "valor_total": "Valor Total",
+            }
+        ),
+        use_container_width=True,
+    )
 
-# -------------------------------------------------------------------
+# =========================================================
 # MAIN
-# -------------------------------------------------------------------
+# =========================================================
 def main():
     st.title("🧊 Motor de Compras — Ar Condicionado")
 
@@ -268,7 +298,7 @@ def main():
     )
 
     with tabs[0]:
-        aba_estoque(estoque_df)
+        aba_estoque(estoque_df, vendas_df)
     with tabs[1]:
         aba_vendas(vendas_df)
     with tabs[2]:
